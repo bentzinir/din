@@ -1,0 +1,4 @@
+N_STEPS = 10
+BS = 24
+WIDTH = 80
+HEIGHT = 80
