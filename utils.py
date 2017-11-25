@@ -11,9 +11,23 @@ def softmax(x):
     return e_x / e_x.sum()
 
 
-def sample(p):
-    x = np.random.multinomial(1, softmax(p)).astype(np.bool)
-    return x # x[:-1]
+def sample(p, tau=100):
+    # v1
+    # p = p * tau
+    # x = np.random.multinomial(1, softmax(p)).astype(np.bool)
+    # return np.argmax(x)
+    # v2
+    # p = np.log(p) / temperature
+    # dist = np.exp(p) / np.sum(np.exp(p))
+    # choices = range(len(p))
+    # choice_idx = np.random.choice(choices, p=dist)
+    # x = np.asarray([False] * len(p))
+    # x[choice_idx] = True
+    # return x
+    # v3
+    logits= p * tau
+    noise = np.random.uniform(size=len(p))
+    return np.argmax(logits - np.log(-np.log(noise)))
 
 
 def getch():
@@ -28,16 +42,24 @@ def getch():
     return ch
 
 
-def get_frame(x, c_in, h, w, scale=True):
-    frame = x.screen_buffer
-    frame = scipy.misc.imresize(frame, [h, w])
-    if scale:
-        frame = frame / 255.
-    if c_in == 3:
-        frame = np.transpose(frame, [2, 0, 1])
-    if c_in == 1:
-        frame = np.expand_dims(frame, 0)
-    return frame
+def one_hot(x, n):
+    x = np.asarray(x)
+    b = np.zeros((x.size, n))
+    b[np.arange(x.size), x] = 1
+    return b
+
+
+def rgb2gray(rgb):
+    return np.dot(rgb[...,:3], [0.299, 0.587, 0.114])
+
+
+def get_frame(x, c_in, h, w, scale=True, resize=True):
+    if resize:
+        x = scipy.misc.imresize(x, [h, w])
+    if x.shape[-1] == 3:
+        x = rgb2gray(x).astype(np.uint8)
+    x = np.expand_dims(x, 0)
+    return x
 
 
 class Buffer(list):
@@ -95,3 +117,20 @@ def compute_mean_abs_norm(grads_and_vars):
         tot_w += tf.reduce_mean(tf.abs(w))
 
     return tot_grad/N, tot_w/N
+
+
+def cat_entropy(logits):
+    a0 = logits - tf.reduce_max(logits, 1, keep_dims=True)
+    ea0 = tf.exp(a0)
+    z0 = tf.reduce_sum(ea0, 1, keep_dims=True)
+    p0 = ea0 / z0
+    return tf.reduce_sum(p0 * (tf.log(z0) - a0), 1)
+
+
+def acc(logits, label_idx):
+    correct = tf.greater_equal(tf.slice(logits, [0, label_idx], [-1, 0]),
+                               tf.slice(logits, [0, 1 - label_idx], [-1, 0]))
+
+    correct = tf.cast(correct, tf.float32)
+    wrong = 1 - correct
+    return tf.reduce_sum(correct) / (tf.reduce_sum(correct)+tf.reduce_sum(wrong))

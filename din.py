@@ -27,6 +27,9 @@ class DIN:
                 scope.reuse_variables()
 
             # x = (?, 64, in_res, in_res)
+
+            x = x / 255.
+
             x = tf.layers.conv2d(x, filters=16, kernel_size=3, strides=2, padding='SAME',
                                  kernel_initializer=torch_conv_initializer, bias_initializer=torch_conv_initializer,
                                  data_format="channels_first")
@@ -42,11 +45,11 @@ class DIN:
             # x = tf.layers.max_pooling2d(x, 2, strides=2, data_format="channels_first")
             # (?, 64, in_res/2, in_res/2)
             x = self._residual(x, 16, 'layer2')
-            x = self._residual(x, 16, 'layer3')
+            # x = self._residual(x, 16, 'layer3')
             x = tf.layers.max_pooling2d(x, 2, strides=2, data_format="channels_first")
             # (?, 64, in_res/4, in_res/4)
             x = self._residual(x, 32, 'layer4')
-            x = self._residual(x, 32, 'layer5')
+            # x = self._residual(x, 32, 'layer5')
             x = tf.layers.max_pooling2d(x, 2, strides=2, data_format="channels_first")
             # (?, 64, in_res/8, in_res/8)
             # x = self._residual(x, 64, 'layer6')
@@ -55,7 +58,7 @@ class DIN:
             x = self._affine(x, 256, activation=self.lrelu)
             # x = self._affine(x, 128, activation=self.lrelu)
 
-            a_logits = self._affine(x, self.num_actions, bn=False)
+            a_logits = self._affine(x, self.num_actions, bn=True)
             d_logits = self._affine(x, 2, bn=False)
 
         return a_logits, d_logits

@@ -1,52 +1,49 @@
-import tensorflow as tf
-import numpy as np
-from din import DIN
-from params import *
-import utils
-import time
 import os
 import sys
-from env.doom_game import DoomClass
-# from experience_replay.rank_based import Experience
-from experience_replay.replay_buffer import ReplayBuffer
-from experience_replay.ER import ER
+import time
+
+import numpy as np
 import pygame
+import tensorflow as tf
 from pygame.locals import *
+
+import utils
+from din import DIN
+# from envs.vizdoom.doom_game import DoomClass
+import gym
+from experience_replay.ER import ER
+from params import *
 
 
 class Trainer:
     def __init__(self):
-        self.agent_buffer = ER(memory_size=20000,
+        self.agent_buffer = ER(memory_size=1000,
                                state_channels=C_IN,
                                state_height=HEIGHT,
                                state_width=WIDTH,
                                action_dim=NUM_ACTIONS,
                                batch_size=BS,
-                               history_length=N_FRAMES
+                               history_length=1
                                )
 
-        self.env = DoomClass(scenario='env/take_cover', timeout=1000, width=WIDTH, height=HEIGHT,
-                             render=RENDER, labels_buffer=False, c_in=C_IN)
+        # self.env = DoomClass(scenario='envs/take_cover', timeout=1000, width=WIDTH, height=HEIGHT,
+        #                      render=RENDER, labels_buffer=False, c_in=C_IN)
+
+        self.env = gym.make("Breakout-v0")
 
         self.create_train_graph()
 
         self.saver = tf.train.Saver()
 
-        self.reset = True
-
         self.expert_acc = 0.
 
         self.fake_acc = 0.
 
-        self.train_expert = True
+        self.reset = True
 
         self.saved_model = MODEL
 
-        self.MOVE_LEFT = [True, False]
-
-        self.MOVE_RIGHT = [False, True]
-
-        self.NULL_ACTION = [False, False]
+        np.set_printoptions(precision=4, linewidth=160)
 
     def create_test_graph(self):
 
@@ -67,9 +64,13 @@ class Trainer:
         else:
             in_shape = [1, N_FRAMES * C_IN, HEIGHT, WIDTH]
 
-        self.x = tf.placeholder(shape=in_shape, dtype=tf.float32, name="x")
+        self.x = tf.placeholder(tf.float32, in_shape, "x_fake")
 
-        self.y = tf.placeholder(shape=(None, 2), dtype=tf.float32, name='y')
+        self.adv = tf.placeholder(tf.float32, [None, ], "advantage")
+
+        self.y = tf.placeholder(tf.int32, [None, ])
+
+        self.a_idx = tf.placeholder(tf.int32, [None, ], "action_index")
 
         self.model = DIN(num_actions=NUM_ACTIONS, is_training=True)
 
@@ -77,58 +78,43 @@ class Trainer:
 
         self.expert_sequence = self.read_data(N_EPISODES)
 
-        self.x_expert = tf.reshape(self.expert_sequence, [-1, C_IN * N_FRAMES, HEIGHT, WIDTH])
+        self.x_expert = tf.reshape(self.expert_sequence, [N_STEPS, N_FRAMES*C_IN, HEIGHT, WIDTH])
 
         self.a_logits, self.d_logits = self.model.forward(self.x, reuse=False)
 
-        d_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=self.y, logits=self.d_logits))
+        _, self.d_logits_ex = self.model.forward(self.x_expert, reuse=True)
+
+        d_expert_loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=tf.zeros(N_STEPS, tf.int32), logits=self.d_logits_ex))
+
+        d_fake_loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.y, logits=self.d_logits))
+
+        neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.a_logits, labels=self.a_idx)
+
+        self.pg_loss = BETA_PG * tf.reduce_mean(self.adv * neglogpac)
+
+        self.entropy = BETA_ENT * tf.reduce_mean(utils.cat_entropy(self.a_logits))
+
+        self.d_loss = BETA_DISC * (d_fake_loss + d_expert_loss)
+
+        loss = self.pg_loss - self.entropy + self.d_loss
 
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
         with tf.control_dependencies(update_ops):
 
-            grads_and_vars = opt.compute_gradients(d_loss)
+            gvs = opt.compute_gradients(loss)
 
-            self.g_norm, self.w_norm = utils.compute_mean_abs_norm(grads_and_vars)
+            capped_gvs = [(tf.clip_by_value(grad, -MAX_GRAD, MAX_GRAD), var) for grad, var in gvs]
 
-            self.d_grad_op = opt.apply_gradients(grads_and_vars)
+            self.g_norm, self.w_norm = utils.compute_mean_abs_norm(capped_gvs)
 
-        # Actor training graph
-        self.advantage = tf.placeholder(shape=None, dtype=tf.float32)
-
-        # self.actions = tf.placeholder(shape=None, dtype=tf.float32)
-
-        # self.a_fake, self.d_fake = self.model.forward(self.x_fake, reuse=False)
-
-        pi = tf.nn.softmax(self.a_logits)
-
-        uniform_logits = tf.ones_like(self.a_logits)
-
-        causal_entropy = tf.nn.softmax_cross_entropy_with_logits(labels=uniform_logits, logits=self.a_logits)
-
-        actor_utility = self.advantage * tf.reduce_sum(tf.log(pi) * self.actions, 1) + BETA * causal_entropy
-
-        # grads_n_vars = opt.compute_gradients(loss=-actor_utility)
-
-        # trainable_vars = tf.trainable_variables()
-
-        # grad_vars = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False) for var in trainable_vars]
-
-        # self.zero_grad = [grad_var.assign(tf.zeros_like(grad_var)) for grad_var in grad_vars]
-
-        # accum_grad = [grad_vars[i].assign_add(gv[0]) for i, gv in enumerate(grads_n_vars)]
-        # self.accum_grad = []
-        # for i, gv in enumerate(grads_n_vars):
-        #    if gv[0] is not None:
-        #        self.accum_grad.append(grad_vars[i].assign_add(gv[0]))
-
-        # self.apply_grad = opt.apply_gradients([(grad_vars[i], grad_n_var[1]) for i, grad_n_var in enumerate(grads_n_vars)])
-
-        self.init_op = tf.global_variables_initializer()
+            self.grad_op = opt.apply_gradients(capped_gvs)
 
     def read_data(self, n_episodes):
+
         filename_queue = tf.train.string_input_producer(
-            [("env/take_cover/ep_%d_frame.bin" % i) for i in range(n_episodes)], num_epochs=None)
+
+            [("envs/breakout/data/ep_%d_frame.bin" % i) for i in range(n_episodes)], num_epochs=None)
 
         reader = tf.FixedLengthRecordReader(WIDTH*HEIGHT*C_IN*N_FRAMES*SKIP_FRAME)
 
@@ -138,25 +124,40 @@ class Trainer:
 
         x = tf.reshape(x, [N_FRAMES*SKIP_FRAME, C_IN, HEIGHT, WIDTH])
 
-        # x = tf.strided_slice(x, [0, 0, 0, 0], [-1, C_IN, HEIGHT, WIDTH], [SKIP_FRAME, 1, 1, 1])
+        x = tf.py_func(self.slice_frames, [x], tf.uint8)
 
-        x = tf.cast(x, tf.float32) / 255.
+        x = tf.reshape(x, [N_FRAMES, C_IN, HEIGHT, WIDTH])
 
-        x = tf.train.shuffle_batch([x], batch_size=BS, capacity=2000, min_after_dequeue=1000)
+        x = tf.cast(x, tf.float32)
+
+        x = tf.train.shuffle_batch([x], batch_size=N_STEPS, capacity=2000, min_after_dequeue=1000)
 
         return x
 
-    def init_agent(self):
+    def init_lists(self):
 
-        self.env.game.new_episode()
+        self.traj_x = []
 
-        state = self.env.game.get_state()
+        self.traj_actions = []
 
-        self.traj_states = utils.init_list(utils.get_frame(state, C_IN, HEIGHT, WIDTH), N_FRAMES)
+        self.traj_d_logits = []
 
-        self.traj_actions = utils.init_list([False] * (NUM_ACTIONS), N_FRAMES)
+        self.traj_a_logits = []
 
-        self.traj_d_logits = utils.init_list(np.zeros((2,), dtype=np.float32), N_FRAMES)
+        self.traj_done = []
+
+    def init_env(self):
+
+        # self.env.game.new_episode()
+        self.env.reset()
+
+        for i in range(4):
+
+            state, _, done, info = self.env.step(1)
+
+        self.x_buffer = utils.Buffer(N_FRAMES, utils.get_frame(state, C_IN, HEIGHT, WIDTH))
+
+        self.reset = False
 
     def save(self, sess, step):
         if self.saved_model is None:
@@ -179,43 +180,38 @@ class Trainer:
 
         for _ in range(skip_frame):
 
-            self.env.game.make_action(action.tolist())
+            # self.env.game.make_action(action.tolist())
+            state, _, done, info = self.env.step(action)
 
-            if self.env.game.is_episode_finished():
-
+            # if self.env.game.is_episode_finished():
+            if info['ale.lives'] < 5:
                 return None
 
-        return self.env.game.get_state()
+        return state
 
-    def read_expert(self, sess):
+    def slice_frames(self, x):
 
-        x, x_seq = sess.run([self.x_expert, self.expert_sequence])
+        offset = np.random.randint(0, SKIP_FRAME, 1)[0]
 
-        x_sliced = []
-
-        for example in x_seq:
-
-            offset = np.random.randint(0, SKIP_FRAME, 1)[0]
-
-            x_sliced.append(example[offset::SKIP_FRAME])
-
-        x_array = np.asarray(x_sliced)
-
-        return np.reshape(x_array, [BS, N_FRAMES*C_IN, HEIGHT, WIDTH])
+        return x[offset::SKIP_FRAME]
 
     def human_input(self):
+        MOVE_LEFT = [True, False]
+        MOVE_RIGHT = [False, True]
+        NULL_ACTION = [False, False]
+
         keys = pygame.key.get_pressed()
-        a = self.NULL_ACTION
+        a = NULL_ACTION
         if keys[K_LEFT]:
-            a = self.MOVE_LEFT
+            a = MOVE_LEFT
         elif keys[K_RIGHT]:
-            a = self.MOVE_RIGHT
+            a = MOVE_RIGHT
         event = pygame.event.poll()
         if (event.type == pygame.KEYDOWN) and (event.key == pygame.K_LEFT):
-            a = self.MOVE_LEFT
+            a = MOVE_LEFT
         elif (event.type == pygame.KEYDOWN) and (event.key == pygame.K_RIGHT):
-            a = self.MOVE_RIGHT
-        time.sleep(0.75)
+            a = MOVE_RIGHT
+        time.sleep(0.25)
         return np.asarray(a)
 
     def test(self):
@@ -226,67 +222,41 @@ class Trainer:
 
             sess.run(self.model.set_validation_mode)
 
-            tf.train.start_queue_runners(sess)
+            # tf.train.start_queue_runners(sess)
 
             while True:
 
                 if self.reset:
 
-                    self.init_agent()
+                    self.init_env()
 
-                    self.reset = False
+                self.env.render()
 
-                d_fake_ = 0.
+                x = np.asarray(self.x_buffer).swapaxes(0, 1)
 
-                while True:
+                a_logits, d_logits = sess.run([self.a_logits, self.d_logits], {self.x: x})
 
-                    x = np.expand_dims(np.concatenate(self.traj_states[-N_FRAMES:], 0), 0)
+                a_logits = np.clip(a_logits, -MAX_A_LOGITS, MAX_A_LOGITS)
 
-                    # TODO: debugging - feeding expert examples
-                    # x = self.read_expert(sess)
-                    # x = np.expand_dims(x[10], 0)
+                a_t = utils.sample(a_logits[0], 1000)
 
-                    a_fake, d_fake = sess.run([self.a_logits, self.d_logits], {self.x: x})
+                if HUMAN_MODE:
 
-                    a_t = utils.sample(a_fake[0])
+                    a_t = self.human_input()
 
-                    if HUMAN_MODE:
+                state = self.interact(a_t, SKIP_FRAME)
 
-                        a_t = self.human_input()
+                if state is None:
 
-                    # # TODO: debug
-                    # a_t = np.asarray([False, False])
+                    self.reset = True
 
-                    state = self.interact(a_t, SKIP_FRAME)
+                    continue
 
-                    if state is None:
+                self.x_buffer.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
 
-                        self.reset = True
+                self.fake_acc = 0.9 * self.fake_acc + 0.1 * self.calc_accuracy(d_logits, 1)
 
-                        break
-
-                    self.traj_states.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
-
-                    self.traj_actions.append(a_t)
-
-                    self.traj_d_logits.append(d_fake[0])
-
-
-
-                    y = np.zeros((BS, 2), dtype=np.float32)
-
-                    y[:, 1] = 1
-
-                    acc = self.calc_accuracy(d_fake, y)
-
-                    self.expert_acc = 0.9 * self.expert_acc + 0.1 * acc
-
-                    adv = d_fake[0][0] - d_fake_
-
-                    d_fake_ = d_fake[0][0]
-
-                    print("acc: %f, advantage: %f, d_expert: %f" % (self.expert_acc, adv, d_fake_))
-
+                print("acc: %f" % (self.fake_acc))
 
     def train(self):
 
@@ -294,32 +264,41 @@ class Trainer:
 
             if MODEL is None:
 
-                sess.run(self.init_op)
+                init_op = tf.global_variables_initializer()
+
+                sess.run(init_op)
 
             else:
+
                 self.load(sess)
 
             tf.train.start_queue_runners(sess)
 
             sess.run(self.model.set_training_mode)
 
+            # self.init_agent()
+
             for ts in range(N_TRAIN_STEPS):
 
-                n = 0
+                # 1. interact with envs. for N_STEPS
 
-                if self.reset:
+                self.init_lists()
 
-                    self.init_agent()
+                for ns in range(N_STEPS):
 
-                    self.reset = False
+                    if self.reset:
 
-                while True:
+                        self.init_env()
 
-                    x = np.expand_dims(np.concatenate(self.traj_states[-N_FRAMES:], 0), 0)
+                    self.env.render()
 
-                    a_fake, d_fake = sess.run([self.a_logits, self.d_logits], {self.x: x})
+                    x = np.asarray(self.x_buffer).swapaxes(0, 1)
 
-                    a_t = utils.sample(a_fake[0])
+                    a_logits, d_logits = sess.run([self.a_logits, self.d_logits], {self.x: x})
+
+                    a_logits = np.clip(a_logits, -MAX_A_LOGITS, MAX_A_LOGITS)
+
+                    a_t = utils.sample(a_logits[0])
 
                     state = self.interact(a_t, SKIP_FRAME)
 
@@ -327,124 +306,95 @@ class Trainer:
 
                         self.reset = True
 
-                        break
+                        if len(self.traj_done) > 0:
 
-                    if n == N_STEPS:
+                            self.traj_done[-1] = True
 
-                        break
+                        continue
 
-                    n += 1
+                    self.x_buffer.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
 
-                    self.traj_states.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
+                    self.traj_x.append(list(self.x_buffer))
 
                     self.traj_actions.append(a_t)
 
-                    self.traj_d_logits.append(d_fake[0])
+                    self.traj_d_logits.append(d_logits[0])
 
-                # print("d_t=%s, adv_t=%f" % (d_fake[0], self.traj_d_logits[-1][0] - self.traj_d_logits[-2][0]))
+                    self.traj_a_logits.append(a_logits[0])
 
-                # second pass: accumulate gradient, penalize low entropy
+                    self.traj_done.append(False)
 
-                # TODO: debug - disabled actor
-                # sess.run(self.zero_grad)
+                # 2. define the advantage
 
-                l = len(self.traj_states)
+                adv = np.asarray(self.traj_d_logits)[1:, 0] - np.asarray(self.traj_d_logits)[:-1, 0]
 
-                for t in range(l-n, l-1):
+                adv = adv * (~np.asarray(self.traj_done[:-1]))
 
-                    self.agent_buffer.add(action=self.traj_actions[t],
-                                          reward=None,
-                                          next_state=self.traj_states[t],
-                                          terminal=False)
+                action_counts = np.histogram(self.traj_actions, NUM_ACTIONS)[0]
 
-                    # TODO: Debug - disabled actor
-                    # adv_t = self.traj_d_logits[t + 1][0] - self.traj_d_logits[t][0]
-                    #
-                    # x_t = self.traj_states[t-N_FRAMES:t]
-                    #
-                    # action_t = self.traj_actions[t]
-                    #
-                    # sess.run(self.accum_grad, {self.advantage: adv_t, self.actions: action_t, self.x_fake: np.expand_dims(np.concatenate(x_t, 0), 0)})
+                mean_a_logits = np.asarray(self.traj_a_logits).mean(axis=0)
 
-                self.agent_buffer.add(action=self.traj_actions[-1],
-                                      reward=None,
-                                      next_state=self.traj_states[-1],
-                                      terminal=True)
+                adv_vec = np.expand_dims(adv, 1) * utils.one_hot(self.traj_actions[:-1], NUM_ACTIONS)
 
-                # TODO: disabled actor
-                # sess.run(self.apply_grad)
+                adv_vec = np.clip(adv_vec, -MAX_ADV, MAX_ADV)
 
-                # DISCRIMINATOR
+                mean_adv = adv_vec.mean(axis=0)
 
-                y = np.zeros((BS, 2), dtype=np.float32)
+                min_adv = adv_vec.min(axis=0)
 
-                if self.train_expert:
+                max_adv = adv_vec.max(axis=0)
 
-                    x = self.read_expert(sess)
+                a_idx = np.asarray(self.traj_actions[:-1])
 
-                    # utils.plot_sequence(np.expand_dims(x[0], 1))
+                # 3. train
 
-                    y[:, 0] = 1
+                x = np.reshape(self.traj_x[:-1], [-1, N_FRAMES*C_IN, HEIGHT, WIDTH])
 
-                else:
+                y = np.ones(x.shape[0], np.int32)
 
-                    x = self.agent_buffer.sample()[0]
+                _, d_fake, d_expert, g_norm, w_norm, expert_seq, pg_loss, entropy, d_loss = sess.run([self.grad_op,
+                                                                            self.d_logits,
+                                                                            self.d_logits_ex,
+                                                                            self.g_norm,
+                                                                            self.w_norm,
+                                                                            self.expert_sequence,
+                                                                            self.pg_loss,
+                                                                            self.entropy,
+                                                                            self.d_loss
+                                                                            ],
+                                                                           {self.x: x,
+                                                                            self.y: y,
+                                                                            self.adv: adv,
+                                                                            self.a_idx: a_idx,
+                                                                            })
 
-                    # utils.plot_sequence(x[0])
+                self.fake_acc = 0.9 * self.fake_acc + 0.1 * self.calc_accuracy(d_fake, 1)
 
-                    x = np.reshape(x, [-1, N_FRAMES * C_IN, HEIGHT, WIDTH])
-
-                    y[:, 1] = 1
-
-                d, g_norm, w_norm = sess.run([self.d_grad_op, self.d_logits, self.g_norm, self.w_norm], {self.x: x, self.y: y})[1:]
-
-                acc = self.calc_accuracy(d, y)
-
-                if self.train_expert:
-
-                    self.expert_acc = 0.9 * self.expert_acc + 0.1 * acc
-
-                else:
-
-                    self.fake_acc = 0.9 * self.fake_acc + 0.1 * acc
+                self.expert_acc = 0.9 * self.expert_acc + 0.1 * self.calc_accuracy(d_expert, 0)
 
                 if ts % SAVE_INTRVL == 0 and MODE == "train":
+
                         self.save(sess, ts)
 
                 if ts % PRINT_INTRVL == 0:
 
-                    print("iter: %d, fake acc: %f, expert acc: %f, g_norm: %f, w_norm: %f, agent_count: %d" %
-                          (ts, self.fake_acc, self.expert_acc, g_norm, w_norm, self.agent_buffer.count))
+                    print("iter: %5d, fake acc: %.3f, expert acc: %.3f, action_count: %s,"
+                          "mean_a_logits %s, min_adv: %s, mean_adv: %s, max_adv: %s, w_norm: %f,"
+                          "g_norm: %f, pg_loss: %.6f, entropy: %.2f, d_loss: %.2f" %
+                          (ts, self.fake_acc, self.expert_acc, action_counts, mean_a_logits, min_adv, mean_adv, max_adv,
+                           w_norm, g_norm, pg_loss, entropy, d_loss))
 
-                self.train_expert = not self.train_expert
+    def calc_accuracy(self, logits, label_idx):
 
-    def calc_accuracy(self, logits, labels):
+        labels = np.zeros_like(logits)
+
+        labels[:, label_idx] = 1
 
         correct = np.sum(logits * labels, 1) > np.sum(logits * (1-labels), 1)
 
         acc = np.sum(correct) / correct.shape[0]
 
         return acc
-
-    def collect_experience(self):
-        if self.env.game.is_episode_finished():
-            self.env.game.new_episode()
-            state = self.env.game.get_state()
-            x = utils.Buffer(N_FRAMES, state)
-        for j in range(1000):
-
-            a_logits, d_fake = self.model.forward(self.x_fake, reuse=False)
-
-            r = self.env.game.make_action(a)
-
-            a_logits, d_t, _ = sess.run([a_logits, d_fake], {self.x_fake: traj_states[-N_FRAMES:]})
-
-            a_t = utils.sample(a_logits)
-
-            self.env.game.make_action(a_t)
-
-            traj_states.append(self.env.game.get_state())
-
 
 if __name__ == "__main__":
     trainer = Trainer()

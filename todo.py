@@ -3,7 +3,6 @@
 # TODO: progressive training: start with a low resolution image and a single conv layer. Gradually double the spatial resolution and add more conv layers.
 # TODO: maximize log D instead of minimize log(1-D)
 # TODO: flip labels when training G and D ???
-# TODO: upsample using pixelShuffle or ConvTranspose2d + stride
-# TODO: occasionaly sample from ER. Mainly present online examples
+# TODO: occasionally sample from ER. Mainly present online examples
 # TODO: constraint the Jacobian of the encoder (spectral norm)
-# TODO: understan the meaning of maintaining two optimizers
+# TODO: understand the meaning of maintaining two optimizers
