@@ -106,6 +106,20 @@ def plot_sequence(x):
         plt.pause(.25)
 
 
+def gradient_norm(loss, variables):
+
+    grad = tf.gradients(loss, variables)
+
+    g_norm = 0
+
+    for g in grad:
+
+        if g is not None:
+            g_norm += tf.reduce_sum(tf.square(g))
+
+    return g_norm
+
+
 def compute_mean_abs_norm(grads_and_vars):
     tot_grad = 0
     tot_w = 0
