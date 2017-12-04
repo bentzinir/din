@@ -10,7 +10,7 @@ N_TRAIN_STEPS = 100000
 N_FRAMES = 2
 SKIP_FRAME = 2
 BETA_PG = 0.5
-BETA_ENT = 0.1
+BETA_ENT = 0.02
 BETA_DISC = 0.5
 MAX_ADV = 0.001
 MAX_A_LOGITS = 1.
@@ -22,9 +22,10 @@ HUMAN_MODE = False
 CHECKPOINTS_DIR = 'chckpoints/'
 
 MODEL = None
-MODEL = "chckpoints/2017-12-02-20-59-37"
+MODEL = "chckpoints/2017-12-04-13-12-58"
 
-MODE = "test"  # "test"
+MODE = "train"
+MODE = "test"
 
 PRINT_INTRVL = 100
 SAVE_INTRVL = 1000

@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-
+import copy
 import numpy as np
 import pygame
 import tensorflow as tf
@@ -29,7 +29,7 @@ class Trainer:
         # self.env = DoomClass(scenario='envs/take_cover', timeout=1000, width=WIDTH, height=HEIGHT,
         #                      render=RENDER, labels_buffer=False, c_in=C_IN)
 
-        self.env = gym.make("Breakout-v0")
+        self.env = gym.make("Breakout-v4")
 
         self.create_train_graph()
 
@@ -196,9 +196,10 @@ class Trainer:
         return x[offset::SKIP_FRAME]
 
     def human_input(self):
-        MOVE_LEFT = [True, False]
-        MOVE_RIGHT = [False, True]
-        NULL_ACTION = [False, False]
+        NULL_ACTION = 0
+        START_ACTION = 1
+        MOVE_LEFT = 3
+        MOVE_RIGHT = 2
 
         keys = pygame.key.get_pressed()
         a = NULL_ACTION
@@ -258,15 +259,15 @@ class Trainer:
 
                 self.x_buffer.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
 
-                adv_vec = self.create_adv(x, d_logits[0][0], clone_s, clone_a, sess, False)
+                adv_vec = self.create_adv(self.x_buffer, d_logits[0][0], clone_s, clone_a, sess, False)
 
                 self.fake_acc = 0.9 * self.fake_acc + 0.1 * self.calc_accuracy(d_logits, 1)
 
                 print("acc: %f, adv_tilda: %s" % (self.fake_acc, adv_vec))
 
-    def create_adv(self, x, d_expert_, clone_s, clone_a, sess, render=False):
+    def create_adv(self, x_buffer, d_expert_, clone_s, clone_a, sess, render=False):
 
-        d_expert = self.explore_d_logits(x, clone_s, clone_a, sess, render)
+        d_expert = self.explore_d_logits(x_buffer, clone_s, clone_a, sess, render)
 
         adv_vec = d_expert - d_expert_
 
@@ -284,11 +285,11 @@ class Trainer:
 
         return (x - self.mean) / (self.std + 1e-4)
 
-    def explore_d_logits(self, x, state, action, sess, render=False):
+    def explore_d_logits(self, x_buffer, state, action, sess, render=False):
 
         d_expert = []
 
-        x_tilda = np.copy(x)
+        x_tilda_buffer = copy.copy(x_buffer)
 
         for a_tilda in range(NUM_ACTIONS):
 
@@ -308,7 +309,9 @@ class Trainer:
 
             else:
 
-                x_tilda[0, -1] = utils.get_frame(state_tilda, C_IN, HEIGHT, WIDTH)
+                x_tilda_buffer.append(utils.get_frame(state_tilda, C_IN, HEIGHT, WIDTH))
+
+                x_tilda = np.asarray(x_tilda_buffer).swapaxes(0, 1)
 
                 a_logits_tilda, d_logits_tilda = sess.run([self.a_logits, self.d_logits], {self.x: x_tilda})
 
@@ -382,7 +385,7 @@ class Trainer:
 
                         continue
 
-                    adv_vec = self.create_adv(x, d_logits[0][0], clone_s, clone_a, sess, False)
+                    adv_vec = self.create_adv(self.x_buffer, d_logits[0][0], clone_s, clone_a, sess, False)
 
                     self.x_buffer.append(utils.get_frame(state, C_IN, HEIGHT, WIDTH))
 
